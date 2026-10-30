@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a2332">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Timekeeping">
+<title>Family Construction Timekeeping</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root{--navy:#1a2332;--orange:#f59e0b;--bg:#f4f6f8;--text:#1f2937;--muted:#6b7280;--card:#fff;--green:#16a34a;--red:#dc2626}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);-webkit-text-size-adjust:100%}
+header{background:var(--navy);color:#fff;padding:calc(env(safe-area-inset-top) + 12px) 16px 12px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:5}
+header h1{font-size:18px;margin:0}header h1 span{color:var(--orange)}
+main{max-width:720px;margin:0 auto;padding:16px 16px calc(env(safe-area-inset-bottom) + 90px)}
+.card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+h2{font-size:18px;margin:0 0 12px}
+label{display:block;font-weight:600;margin:10px 0 6px;font-size:15px}
+input,select,textarea{width:100%;font-size:16px;padding:12px;border:1px solid #d1d5db;border-radius:10px;background:#fff;color:var(--text)}
+textarea{min-height:70px}
+button{font-size:17px;font-weight:700;border:0;border-radius:12px;padding:14px 18px;min-height:52px;cursor:pointer;background:var(--navy);color:#fff;width:100%;margin-top:10px}
+button.orange{background:var(--orange);color:var(--navy)}button.green{background:var(--green)}button.red{background:var(--red)}
+button.ghost{background:transparent;color:var(--navy);border:2px solid var(--navy)}
+button.small{width:auto;min-height:40px;padding:8px 12px;font-size:14px;margin:0}
+button:disabled{opacity:.5}
+.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}
+.muted{color:var(--muted);font-size:14px}
+.status{font-size:15px;padding:12px;border-radius:10px;background:#eef2f7;margin-bottom:8px}
+.status.on{background:#dcfce7;color:#14532d}
+.timer{font-size:44px;font-weight:800;text-align:center;font-variant-numeric:tabular-nums;color:var(--navy)}
+nav{position:fixed;bottom:0;left:0;right:0;background:var(--navy);display:flex;padding-bottom:env(safe-area-inset-bottom);z-index:5}
+nav button{background:transparent;color:#cbd5e1;border-radius:0;margin:0;font-size:13px;min-height:60px;padding:6px}
+nav button.active{color:var(--orange)}
+.list-item{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #eef0f3;cursor:pointer;gap:8px}
+.list-item:last-child{border-bottom:0}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:8px 4px;border-bottom:1px solid #eef0f3}
+.total{font-weight:800;font-size:20px;color:var(--navy)}
+.msg{padding:12px;border-radius:10px;margin:10px 0;font-size:15px}.msg.err{background:#fee2e2;color:#7f1d1d}.msg.ok{background:#dcfce7;color:#14532d}
+img.photo{max-width:100%;border-radius:10px;margin-top:8px}
+.hidden{display:none!important}
+a{color:#b45309}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#e5e7eb}
+</style>
+</head>
+<body>
+<header><h1>Family <span>Construction</span></h1><button id="signOutBtn" class="small ghost hidden" style="color:#fff;border-color:#fff">Sign out</button></header>
+<main id="app"><div class="card">Loading…</div></main>
+<nav id="nav" class="hidden"></nav>
+
+<script>
+const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+
+const app = document.getElementById('app');
+const nav = document.getElementById('nav');
+const signOutBtn = document.getElementById('signOutBtn');
+let sb = null, user = null, profile = null, sites = [], openCard = null, timerInt = null, currentTab = 'clock';
+
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtDT = (d) => d ? new Date(d).toLocaleString([], {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}) : '—';
+const fmtT = (d) => d ? new Date(d).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : '—';
+const hoursOf = (c) => ((c.clock_out ? new Date(c.clock_out) : new Date()) - new Date(c.clock_in)) / 3600000;
+const fmtH = (h) => h.toFixed(2);
+const mapLink = (lat, lng) => (lat != null && lng != null) ? `<a href="https://maps.google.com/?q=${lat},${lng}" target="_blank" rel="noopener">${(+lat).toFixed(5)}, ${(+lng).toFixed(5)}</a>` : '—';
+function weekStart(d) { const x = new Date(d); x.setHours(0,0,0,0); const day = (x.getDay() + 6) % 7; x.setDate(x.getDate() - day); return x; }
+function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
+function isoDate(d) { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}-${String(x.getDate()).padStart(2,'0')}`; }
+function msg(text, type = 'err') { return `<div class="msg ${type}">${esc(text)}</div>`; }
+function flash(text, type = 'err') { const el = document.getElementById('flash'); if (el) el.innerHTML = msg(text, type); }
+
+if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+
+function init() {
+  if (SUPABASE_URL.startsWith('YOUR_') || SUPABASE_ANON_KEY.startsWith('YOUR_') || !window.supabase) {
+    app.innerHTML = `<div class="card"><h2>Setup needed</h2><p>This app isn't connected to its database yet.</p>
+      <p class="muted">Open <b>index.html</b> and replace <code>YOUR_SUPABASE_URL</code> and <code>YOUR_SUPABASE_ANON_KEY</code> with the values from Supabase → Project Settings → API. See README.md.</p></div>`;
+    return;
+  }
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  sb.auth.onAuthStateChange((_e, session) => { handleSession(session); });
+  sb.auth.getSession().then(({ data }) => handleSession(data.session));
+}
+
+let lastUid = undefined;
+async function handleSession(session) {
+  const uid = session ? session.user.id : null;
+  if (uid === lastUid) return; lastUid = uid;
+  user = session ? session.user : null;
+  if (!user) { profile = null; signOutBtn.classList.add('hidden'); nav.classList.add('hidden'); renderAuth(); return; }
+  signOutBtn.classList.remove('hidden');
+  const { data } = await sb.from('profiles').select('*').eq('id', user.id).maybeSingle();
+  profile = data || { id: user.id, email: user.email, role: 'employee' };
+  renderNav(); go('clock');
+}
+
+signOutBtn.onclick = async () => { await sb.auth.signOut(); };
+
+function renderAuth(mode = 'in') {
+  app.innerHTML = `<div class="card"><h2>${mode === 'in' ? 'Sign in' : 'Create account'}</h2>
+    <div id="flash"></div>
+    ${mode === 'up' ? '<label>Full name</label><input id="fullName" autocomplete="name">' : ''}
+    <label>Email</label><input id="email" type="email" autocomplete="email" autocapitalize="off">
+    <label>Password</label><input id="password" type="password" autocomplete="${mode === 'in' ? 'current-password' : 'new-password'}">
+    <button id="authBtn" class="orange">${mode === 'in' ? 'Sign in' : 'Sign up'}</button>
+    <button id="switchBtn" class="ghost">${mode === 'in' ? 'New here? Create an account' : 'Have an account? Sign in'}</button></div>`;
+  document.getElementById('switchBtn').onclick = () => renderAuth(mode === 'in' ? 'up' : 'in');
+  document.getElementById('authBtn').onclick = async () => {
+    const email = document.getElementById('email').value.trim();
+    const password = document.getElementById('password').value;
+    if (!email || !password) return flash('Enter email and password.');
+    const btn = document.getElementById('authBtn'); btn.disabled = true;
+    try {
+      if (mode === 'in') {
+        const { error } = await sb.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+      } else {
+        const full_name = document.getElementById('fullName').value.trim();
+        const { data, error } = await sb.auth.signUp({ email, password, options: { data: { full_name } } });
+        if (error) throw error;
+        if (!data.session) flash('Check your email to confirm your account, then sign in.', 'ok');
+      }
+    } catch (e) { flash(e.message || 'Something went wrong.'); }
+    btn.disabled = false;
+  };
+}
+
+function renderNav() {
+  const tabs = [['clock','⏱ Clock'],['week','📅 Week'],['history','📋 History']];
+  if (profile.role === 'admin') tabs.push(['admin','🛠 Admin']);
+  nav.innerHTML = tabs.map(([k, l]) => `<button data-tab="${k}">${l}</button>`).join('');
+  nav.classList.remove('hidden');
+  nav.querySelectorAll('button').forEach((b) => b.onclick = () => go(b.dataset.tab));
+}
+
+function go(tab) {
+  currentTab = tab; clearInterval(timerInt);
+  nav.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+  ({ clock: renderClock, week: renderWeek, history: renderHistory, admin: renderAdmin })[tab]();
+  window.scrollTo(0, 0);
+}
+
+async function loadSites() {
+  const { data } = await sb.from('job_sites').select('*').eq('active', true).order('name');
+  sites = data || [];
+}
+const siteName = (id, list = sites) => (list.find((s) => s.id === id) || {}).name || 'Unknown site';
+
+function getGPS() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition((p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }), () => resolve(null), { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  });
+}
+
+async function uploadPhoto(file) {
+  if (!file) return null;
+  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
+  const path = `${user.id}/${Date.now()}.${ext}`;
+  const { error } = await sb.storage.from('photos').upload(path, file, { contentType: file.type || 'image/jpeg' });
+  if (error) throw error;
+  return path;
+}
+
+async function renderClock() {
+  app.innerHTML = '<div class="card">Loading…</div>';
+  await loadSites();
+  const { data } = await sb.from('time_cards').select('*').eq('user_id', user.id).is('clock_out', null).order('clock_in', { ascending: false }).limit(1);
+  openCard = (data && data[0]) || null;
+  const name = profile.full_name || profile.email || '';
+  app.innerHTML = `<div class="card"><div class="muted">Signed in as ${esc(name)} ${profile.role === 'admin' ? '<span class="pill">admin</span>' : ''}</div>
+    <div id="flash"></div>
+    ${openCard ? `<div class="status on">Clocked in at <b>${esc(siteName(openCard.job_site_id))}</b> since ${fmtT(openCard.clock_in)}</div>
+      <div class="timer" id="timer">0:00:00</div>` : `<div class="status">You are clocked out.</div>`}
+    ${openCard ? '' : `<label>Job site</label><select id="site">${sites.length ? sites.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('') : '<option value="">No job sites yet — ask an admin</option>'}</select>`}
+    <label>Photo (optional)</label><input id="photo" type="file" accept="image/*" capture="environment">
+    <label>Notes (optional)</label><textarea id="notes" placeholder="What are you working on?"></textarea>
+    ${openCard ? '<button id="clockBtn" class="red">Clock Out</button>' : '<button id="clockBtn" class="green">Clock In</button>'}
+    <p class="muted">Your location is recorded when you clock in and out.</p></div>`;
+  if (openCard) {
+    const tick = () => { const s = Math.floor((Date.now() - new Date(openCard.clock_in)) / 1000); const el = document.getElementById('timer'); if (el) el.textContent = `${Math.floor(s/3600)}:${String(Math.floor(s%3600/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`; };
+    tick(); timerInt = setInterval(tick, 1000);
+  }
+  document.getElementById('clockBtn').onclick = clockAction;
+}
+
+async function clockAction() {
+  const btn = document.getElementById('clockBtn'); btn.disabled = true; btn.textContent = 'Getting location…';
+  try {
+    const gps = await getGPS();
+    const file = document.getElementById('photo').files[0];
+    const notes = document.getElementById('notes').value.trim();
+    btn.textContent = 'Saving…';
+    const photo_path = await uploadPhoto(file);
+    if (!openCard) {
+      const job_site_id = document.getElementById('site').value;
+      if (!job_site_id) throw new Error('Pick a job site first.');
+      const { error } = await sb.from('time_cards').insert({ user_id: user.id, job_site_id, clock_in: new Date().toISOString(), in_lat: gps && gps.lat, in_lng: gps && gps.lng, photo_path, notes: notes || null });
+      if (error) throw error;
+    } else {
+      const upd = { clock_out: new Date().toISOString(), out_lat: gps && gps.lat, out_lng: gps && gps.lng };
+      if (photo_path) upd.photo_path = photo_path;
+      if (notes) upd.notes = openCard.notes ? `${openCard.notes}\n${notes}` : notes;
+      const { error } = await sb.from('time_cards').update(upd).eq('id', openCard.id);
+      if (error) throw error;
+    }
+    await renderClock();
+    flash(gps ? 'Saved!' : 'Saved (location unavailable — check Location permission).', gps ? 'ok' : 'err');
+  } catch (e) { flash(e.message || 'Could not save.'); btn.disabled = false; btn.textContent = openCard ? 'Clock Out' : 'Clock In'; }
+}
+
+let weekOffset = 0;
+async function renderWeek() {
+  await loadSites();
+  const start = addDays(weekStart(new Date()), weekOffset * 7), end = addDays(start, 7);
+  const { data } = await sb.from('time_cards').select('*').eq('user_id', user.id).gte('clock_in', start.toISOString()).lt('clock_in', end.toISOString()).order('clock_in');
+  const cards = data || [];
+  const days = [...Array(7)].map((_, i) => addDays(start, i));
+  let total = 0;
+  const rows = days.map((d) => { const h = cards.filter((c) => isoDate(c.clock_in) === isoDate(d)).reduce((a, c) => a + hoursOf(c), 0); total += h; return `<tr><td>${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</td><td style="text-align:right">${fmtH(h)} h</td></tr>`; }).join('');
+  app.innerHTML = `<div class="card"><div class="row"><button class="small ghost" id="prevW">‹ Prev</button><b style="text-align:center">${start.toLocaleDateString([], { month: 'short', day: 'numeric' })} – ${addDays(start, 6).toLocaleDateString([], { month: 'short', day: 'numeric' })}</b><button class="small ghost" id="nextW" ${weekOffset >= 0 ? 'disabled' : ''}>Next ›</button></div>
+    <table style="margin-top:12px">${rows}</table><p class="total">Total: ${fmtH(total)} hours</p></div>`;
+  document.getElementById('prevW').onclick = () => { weekOffset--; renderWeek(); };
+  document.getElementById('nextW').onclick = () => { if (weekOffset < 0) { weekOffset++; renderWeek(); } };
+}
+
+async function allSites() { const { data } = await sb.from('job_sites').select('*').order('name'); return data || []; }
+
+async function renderHistory() {
+  const list = await allSites();
+  const { data } = await sb.from('time_cards').select('*').eq('user_id', user.id).order('clock_in', { ascending: false }).limit(100);
+  const cards = data || [];
+  app.innerHTML = `<div class="card"><h2>History</h2>${cards.length ? cards.map((c) => `<div class="list-item" data-id="${c.id}"><div><b>${esc(siteName(c.job_site_id, list))}</b><div class="muted">${fmtDT(c.clock_in)} → ${c.clock_out ? fmtT(c.clock_out) : 'now'}</div></div><div><b>${fmtH(hoursOf(c))}h</b></div></div>`).join('') : '<p class="muted">No time cards yet.</p>'}</div>`;
+  app.querySelectorAll('.list-item').forEach((el) => el.onclick = () => renderDetail(cards.find((c) => c.id === el.dataset.id), list, renderHistory));
+}
+
+async function renderDetail(c, list, back, who) {
+  clearInterval(timerInt);
+  app.innerHTML = `<div class="card"><button class="small ghost" id="backBtn">‹ Back</button><h2 style="margin-top:12px">${esc(siteName(c.job_site_id, list))}</h2>
+    ${who ? `<p><b>Employee:</b> ${esc(who)}</p>` : ''}
+    <p><b>Clock in:</b> ${fmtDT(c.clock_in)}<br><span class="muted">GPS: ${mapLink(c.in_lat, c.in_lng)}</span></p>
+    <p><b>Clock out:</b> ${c.clock_out ? fmtDT(c.clock_out) : 'Still clocked in'}<br><span class="muted">GPS: ${mapLink(c.out_lat, c.out_lng)}</span></p>
+    <p class="total">${fmtH(hoursOf(c))} hours</p>
+    ${c.notes ? `<p><b>Notes:</b><br>${esc(c.notes).replace(/\n/g, '<br>')}</p>` : ''}
+    <div id="photoBox">${c.photo_path ? '<p class="muted">Loading photo…</p>' : '<p class="muted">No photo.</p>'}</div></div>`;
+  document.getElementById('backBtn').onclick = back;
+  if (c.photo_path) {
+    const { data, error } = await sb.storage.from('photos').createSignedUrl(c.photo_path, 3600);
+    const box = document.getElementById('photoBox');
+    if (box) box.innerHTML = error ? msg('Could not load photo.') : `<img class="photo" src="${esc(data.signedUrl)}" alt="Time card photo">`;
+  }
+}
+
+let adminFilter = { emp: '', week: 0 };
+async function renderAdmin() {
+  if (profile.role !== 'admin') return go('clock');
+  app.innerHTML = '<div class="card">Loading…</div>';
+  const list = await allSites();
+  const { data: people } = await sb.from('profiles').select('*').order('email');
+  const emps = people || [];
+  const start = addDays(weekStart(new Date()), adminFilter.week * 7), end = addDays(start, 7);
+  let q = sb.from('time_cards').select('*').gte('clock_in', start.toISOString()).lt('clock_in', end.toISOString()).order('clock_in', { ascending: false });
+  if (adminFilter.emp) q = q.eq('user_id', adminFilter.emp);
+  const { data } = await q; const cards = data || [];
+  const empName = (id) => { const p = emps.find((e) => e.id === id); return p ? (p.full_name || p.email) : 'Unknown'; };
+  const totals = {}; cards.forEach((c) => { totals[c.user_id] = (totals[c.user_id] || 0) + hoursOf(c); });
+  const grand = Object.values(totals).reduce((a, b) => a + b, 0);
+
+  app.innerHTML = `<div class="card"><h2>Job sites</h2><div id="flash"></div>
+      ${list.map((s) => `<div class="list-item" style="cursor:default"><div><b>${esc(s.name)}</b> ${s.active ? '' : '<span class="pill">inactive</span>'}<div class="muted">${esc(s.address || '')}</div></div><button class="small ${s.active ? 'red' : 'green'}" data-site="${s.id}" data-active="${s.active}">${s.active ? 'Deactivate' : 'Activate'}</button></div>`).join('') || '<p class="muted">No job sites yet.</p>'}
+      <label>New site name</label><input id="newName"><label>Address</label><input id="newAddr"><button id="addSite" class="orange">Add job site</button></div>
+    <div class="card"><h2>Time cards</h2>
+      <label>Employee</label><select id="empSel"><option value="">All employees</option>${emps.map((e) => `<option value="${e.id}" ${e.id === adminFilter.emp ? 'selected' : ''}>${esc(e.full_name || e.email)}${e.role === 'admin' ? ' (admin)' : ''}</option>`).join('')}</select>
+      <div class="row" style="margin-top:12px"><button class="small ghost" id="prevW">‹ Prev</button><b style="text-align:center">${start.toLocaleDateString([], { month: 'short', day: 'numeric' })} – ${addDays(start, 6).toLocaleDateString([], { month: 'short', day: 'numeric' })}</b><button class="small ghost" id="nextW">Next ›</button></div>
+      <table style="margin-top:12px"><tr><th>Employee</th><th style="text-align:right">Hours</th></tr>${Object.keys(totals).map((id) => `<tr><td>${esc(empName(id))}</td><td style="text-align:right">${fmtH(totals[id])}</td></tr>`).join('') || '<tr><td colspan="2" class="muted">No time this week.</td></tr>'}</table>
+      <p class="total">Total: ${fmtH(grand)} hours</p>
+      <button id="csvBtn" class="ghost">Export CSV</button>
+      <div style="margin-top:12px">${cards.map((c) => `<div class="list-item" data-id="${c.id}"><div><b>${esc(empName(c.user_id))}</b> · ${esc(siteName(c.job_site_id, list))}<div class="muted">${fmtDT(c.clock_in)} → ${c.clock_out ? fmtT(c.clock_out) : 'now'}</div></div><b>${fmtH(hoursOf(c))}h</b></div>`).join('')}</div></div>`;
+
+  app.querySelectorAll('[data-site]').forEach((b) => b.onclick = async () => {
+    const { error } = await sb.from('job_sites').update({ active: b.dataset.active !== 'true' }).eq('id', b.dataset.site);
+    if (error) return flash(error.message); renderAdmin();
+  });
+  document.getElementById('addSite').onclick = async () => {
+    const name = document.getElementById('newName').value.trim(); const address = document.getElementById('newAddr').value.trim();
+    if (!name) return flash('Enter a site name.');
+    const { error } = await sb.from('job_sites').insert({ name, address: address || null });
+    if (error) return flash(error.message); renderAdmin();
+  };
+  document.getElementById('empSel').onchange = (e) => { adminFilter.emp = e.target.value; renderAdmin(); };
+  document.getElementById('prevW').onclick = () => { adminFilter.week--; renderAdmin(); };
+  document.getElementById('nextW').onclick = () => { adminFilter.week++; renderAdmin(); };
+  app.querySelectorAll('.list-item[data-id]').forEach((el) => el.onclick = () => { const c = cards.find((x) => x.id === el.dataset.id); renderDetail(c, list, renderAdmin, empName(c.user_id)); });
+  document.getElementById('csvBtn').onclick = () => {
+    const q = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+    const lines = [['Employee','Email','Job site','Clock in','Clock out','Hours','In lat','In lng','Out lat','Out lng','Notes'].join(',')];
+    cards.slice().reverse().forEach((c) => { const p = emps.find((e) => e.id === c.user_id) || {}; lines.push([p.full_name, p.email, siteName(c.job_site_id, list), c.clock_in, c.clock_out, c.clock_out ? fmtH(hoursOf(c)) : '', c.in_lat, c.in_lng, c.out_lat, c.out_lng, c.notes].map(q).join(',')); });
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `timecards-${isoDate(start)}.csv`; document.body.appendChild(a); a.click(); a.remove();
+  };
+}
+
+init();
+</script>
+</body>
+</html>
